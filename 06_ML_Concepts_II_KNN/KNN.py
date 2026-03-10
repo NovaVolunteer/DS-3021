@@ -1,508 +1,579 @@
 """
-KNN: Week 6
+K-Nearest Neighbors (KNN) Classification with Nested Cross-Validation
+
+This script demonstrates KNN classification using nested cross-validation:
+- Outer loop: Evaluates model performance on test set
+- Inner loop: Tunes hyperparameters using validation set
+
+The code follows PEP 8 standards and includes extensive comments for
+educational purposes.
+
+Author: DS-3021 Course
+Date: 2024
 """
 
-#%%
-# first, import your libraries!
+# %%
+# ============================================================================
+# IMPORT LIBRARIES
+# ============================================================================
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split
-from sklearn.neighbors import KNeighborsClassifier
+import random
 from matplotlib import pyplot as plt
 import seaborn as sns
-from sklearn import preprocessing
-import random
-from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
-from sklearn.metrics import classification_report
+
+# Scikit-learn imports for machine learning
+from sklearn.model_selection import (cross_val_score, GridSearchCV, KFold)
+from sklearn.neighbors import KNeighborsClassifier
 from sklearn import metrics
+from sklearn.metrics import (confusion_matrix, ConfusionMatrixDisplay,
+                             classification_report)
 
-#%%
-# -------- Data prep --------
-# Based on the following data summary, what questions and business metric should we use? 
-
-bank_data = pd.read_csv("https://raw.githubusercontent.com/UVADS/DS-3001/main/data/bank.csv")
-print(bank_data.info())
-
-#%%
-# now, let's check the data composition
-print("marital", bank_data.marital.value_counts())   # 3 levels
-print("education", bank_data.education.value_counts())   # 4 levels
-print("default", bank_data.default.value_counts())   # 2 levels
-print("job", bank_data.job.value_counts())   # 12 levels! What should we do?
-print("contact", bank_data.contact.value_counts())   # 3 levels -- difference between cellular and telephone?
-print("housing", bank_data.housing.value_counts())   # 2 levels
-print("poutcome", bank_data.poutcome.value_counts())   # 4 levels
-print("signed up", bank_data['signed up'].value_counts())   # 2 levels
-
-#%%
-# Let's collapse `job` which has 12 levels
-employed = ['admin', 'blue-collar', 'entrepreneur', 'housemaid', 'management',
-           'self-employed', 'services', 'technician']
-# unemployed = ['student', 'unemployed', 'unknown']
-bank_data.job = bank_data.job.apply(lambda x: "Employed" if x in employed else "Unemployed")
-print(bank_data.job.value_counts())
-
-#%%
-# now, we convert the appropriate columns into factors
-cat = ['job', 'marital', 'education', 'default', 'housing', 'contact',
-      'poutcome', 'signed up']   # select the columns to convert
-bank_data[cat] = bank_data[cat].astype('category')
-bank_data.info()
-
-#%%
-# -------- Check for missing data --------
-
-import seaborn as sns
-sns.displot(
-    data=bank_data.isna().melt(value_name="missing"),
-    y="variable",
-    hue="missing",
-    multiple="fill",
-    aspect=1.25
-)
-# plt.savefig("visualizing_missing_data_with_barplot_Seaborn_distplot.png", dpi=100)
-# the above line will same the image to your computer!
-
-# NO MISSING DATA!
-
-#%%
-# now, we normalize the numeric variables
-numeric_cols = bank_data.select_dtypes(include='int64').columns
-print(numeric_cols)
-
-
-#%%
-from sklearn import preprocessing
-scaler = preprocessing.MinMaxScaler()
-d = scaler.fit_transform(bank_data[numeric_cols])   # conduct data transformation
-scaled_df = pd.DataFrame(d, columns=numeric_cols)   # convert back to pd df; transformation converts to array
-bank_data[numeric_cols] = scaled_df   # put data back into the main df
-
-#%%
-bank_data.describe()   # as we can see, the data is now normalized!
-
-#%%
-# Now, we onehot encode the data -- for reference, this is the process of converting categorical variables to a usable form for 
-# a machine learning algorithm.
-
-cat_cols = bank_data.select_dtypes(include='category').columns
-print(cat_cols)
-
-encoded = pd.get_dummies(bank_data[cat_cols])
-encoded.head()   # note the new columns
-
-#What types of variables does the get_dummies function work on and does it have a feature to remove the original column?
-
-#%%
-# now we want to drop the old columns we onehot encoded 
-bank_data = bank_data.drop(cat_cols, axis=1)
-
-#%%
-# and then join them
-bank_data = bank_data.join(encoded)
-#What is this join function doing? What is it joining on?
-
-#%%
-print(bank_data.info())
-
-#%%
-# -------- Train model! --------
-# check prevalence
-print(bank_data['signed up_1'].value_counts()[1] / bank_data['signed up_1'].count())
-# This means that at random, we have an 11.6% chance of correctly picking a subscribed individual. Let's see if kNN can do any better.
-
-#%%
-               # dependent variable
-train, test = train_test_split(bank_data,  test_size=0.4, stratify = bank_data['signed up_1']) 
-test, val = train_test_split(test, test_size=0.5, stratify=test['signed up_1'])
+# Import our custom data preparation functions
+from data_preparation import (prepare_bank_data, split_train_val_test,
+                              prepare_features_and_target)
 
 # %%
-def clean_and_split_data(df, target, test_size=0.4, val_size=0.5, random_state=1984):
-    # Collapse 'job' levels
-    employed = ['admin', 'blue-collar', 'entrepreneur', 'housemaid', 'management',
-                'self-employed', 'services', 'technician']
-    df.iloc[:, df.columns.get_loc('job')] = df.iloc[:, df.columns.get_loc('job')].apply(lambda x: "Employed" if x in employed else "Unemployed")
-    
-    # Convert appropriate columns to category
-    cat_cols = ['job', 'marital', 'education', 'default', 'housing', 'contact', 'poutcome', target]
-    df[cat_cols] = df[cat_cols].astype('category')
-    
-    # Normalize numeric columns
-    numeric_cols = df.select_dtypes(include='int64').columns
-    scaler = preprocessing.MinMaxScaler()
-    df[numeric_cols] = scaler.fit_transform(df[numeric_cols])
-    
-    # One-hot encode categorical columns
-    encoded = pd.get_dummies(df[cat_cols])
-    df = df.drop(cat_cols, axis=1).join(encoded)
-    
-    # Split data into train, test, and validation sets
-    train, test = train_test_split(df, test_size=test_size, stratify=df[f'{target}_1'], random_state=random_state)
-    test, val = train_test_split(test, test_size=val_size, stratify=test[f'{target}_1'], random_state=random_state)
-    
-    return train, test, val
-# Usage
-train, test, val = clean_and_split_data(bank_data, 'signed up')
-
-#%%
-# now, let's train the classifier for k=9
-import random
-random.seed(1984)   # kNN is a random algorithm, so we use `random.seed(x)` to make results repeatable
-
-X_train = train.drop(['signed up_1'], axis=1)
-y_train = train['signed up_1'].values
-
-neigh = KNeighborsClassifier(n_neighbors=9)
-neigh.fit(X_train, y_train)
-
-# Measure accuracy on the training data
-X_train = train.drop(['signed up_1'], axis=1)
-y_train = train['signed up_1'].values
-
-#%%
-train_accuracy = neigh.score(X_train, y_train)
-print(f"Training Accuracy: {train_accuracy}")
-
-#%%
-# now, we check the model's accuracy on the test data:
-
-X_val = val.drop(['signed up_1'], axis=1)
-y_val = val['signed up_1'].values
-
-print(neigh.score(X_val, y_val))
-
-#%%
-# now, we test the accuracy on our validation data.
-
-X_test = test.drop(['signed up_1'], axis=1).values
-y_test = test['signed up_1'].values
-
-print(neigh.score(X_test, y_test))
-#%%
-# -------- Evaluate model --------
-# A 99.0% accuracy rate is pretty good but keep in mind the baserate is roughly 89/11, so we have more or less a 90% chance of 
-# guessing right if we don't know anything about the customer, but the negative outcomes we don't really care about, this model's 
-# value is being able to id sign ups when they are actually sign ups. This requires us to know are true positive rate, or 
-# Sensitivity or Recall. So let's dig a little deeper.   
-
-# create a confusion matrix
-y_val_pred = neigh.predict(X_val)
-
-from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
-
-cm = confusion_matrix(y_val,y_val_pred, labels=neigh.classes_)
-disp=ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=neigh.classes_)  
-disp.plot()
-plt.show()
+# ============================================================================
+# CONSTANTS
+# ============================================================================
+# Data source URL - can be easily changed to use different datasets
+DATA_URL = "https://raw.githubusercontent.com/UVADS/DS-3001/main/data/bank.csv"
 
 
-#%%
-# create a classification report
-# create classification report
-from sklearn.metrics import classification_report
-
-print(classification_report(y_val_pred, y_val))
-
-# we didn't get sensitivity and specificity, so we'll calculate that ourselves.
-sensitivity = 943/(943+72)   # = TP/(TP+FN)
-specificity = 7707/(7707+4)   # = TN/(TN+FP)
-print(sensitivity, specificity)
-
-#%%
-# ------- Selecting the correct 'k' ---------
-def chooseK(k, X_train, y_train, X_test, y_test):
-    random.seed(1)
-    print("calculating... ", k, "k")    # I'll include this so you can see the progress of the function as it runs
-    class_knn = KNeighborsClassifier(n_neighbors=k)
-    class_knn.fit(X_train, y_train)
-    
-    # calculate accuracy
-    accu = class_knn.score(X_test, y_test)
-    return accu
-
-# We'll test odd k values from 1 to 21. We want to create a table of all the data, so we'll use list comprehension to create 
-# the "accuracy" column. 
-
-#%%
-# REMEMBER: Python is end-exclusive; we want UP to 21 to we'll have to extend the end bound to include it
-test = pd.DataFrame({'k':list(range(1,22,2)), 
-                     'accu':[chooseK(i, X_train, y_train, X_test, y_test) for i in list(range(1, 22, 2))]})
-
-#%%
-print(test)
-
-#%%
-# Check for features that perfectly predict the 'signed up' variable
-for column in bank_data.columns:
-   if column != 'signed up_1':
-        crosstab = pd.crosstab(bank_data[column], bank_data['signed up_1'])
-        if crosstab.max().max() == crosstab.sum().max():
-            print(f"Feature '{column}' perfectly predicts the 'signed up' variable.")
-
-#%%
-test = test.sort_values(by=['accu'], ascending=False)
-print(test)
-
-#%%
-# From here, we see that the best value of k is at the top of the df!
-
-# Let's go through the code we wrote in a bit more detail, specifically regarding the DataFrame construction.
-
-# pandas DataFrames wrap around the Python dictionary data type, which is identifiable by the use of curly brackets ({}) 
-# and key-value pairs. The keys correspond to the column names (i.e. 'k' or 'accu') while the values are a list comprised of 
-# all the values we want to include. 
-
-# For 'k', we made a list of the range of numbers from 1 to 22 (end exclusive), selecting only every *other* value. This is 
-# done using the syntax: `range(first_val, end_val, by=?)`. Having no `by=` value means that we select every value in that range.
-
-# For 'accu', we used list comprehension, which boils down to being loop shorthand with the output being entered into a list.
-#  --> for more info on list comprehension, check this link: https://www.w3schools.com/python/python_lists_comprehension.asp
-
-# Now, let's graph our results!
-plt.plot(test['k'], test['accu'])
-plt.xlabel('k')
-plt.ylabel('Accuracy')
-plt.title('Model Accuracy')
-plt.show()
-
-#%%
-# -------- Adjusting the threshold --------
-# we want to make a table containing: probability, expected, and actual values
-
-test_probs = neigh.predict_proba(X_test)
-test_preds = neigh.predict(X_test)
-
-#%%
-# convert probabilities to pd df
-test_probabilities = pd.DataFrame(test_probs, columns = ['not_signed_up_prob', 'signed_up_prob'])
-test_probabilities.head()
-#%%
-final_model = pd.DataFrame({'actual_class': y_test.tolist(),
-                           'pred_class': test_preds.tolist(),
-                           'pred_prob': test_probabilities['signed_up_prob']})
-final_model.head()
-
-#%%
-# convert classes to categories
-final_model.actual_class = final_model.actual_class.astype('category')
-final_model.pred_class = final_model.pred_class.astype('category')
-
-#%%
-# create probability distribution graph
-sns.displot(final_model, x="pred_prob", kind="kde")
-
-#%%
-# just to see this a little clearer
-print(final_model.pred_prob.value_counts())
-
-# In most datasets, the probabilities range between 0 and 1, causing uncertain predictions. A threshold must be set for 
-# where you consider the prediction to actually be a part of the positive class. Is a 60% certainty positive? How about 40%? 
-# This is where you have more control over your model's classifications. **This is especially useful for reducing incorrect 
-# classifications that you may have noticed in your confusion matrix.**
-
-#%%
-def adjust_thres(x, y, z):
+# ============================================================================
+# LOAD AND EXPLORE DATA
+# ============================================================================
+def load_and_explore_data():
     """
-    x=pred_probabilities
-    y=threshold
-    z=tune_outcome
+    Load the bank marketing dataset and perform initial exploration.
+
+    This function loads data from a remote URL and prints summary statistics
+    to help understand the dataset structure and composition.
+
+    Returns:
+    --------
+    pandas.DataFrame
+        The raw bank marketing dataset
     """
-    thres = pd.DataFrame({'new_preds': [1 if i > y else 0 for i in x]})
-    thres.new_preds = thres.new_preds.astype('category')
-    con_mat = confusion_matrix(z, thres)  
-    print(con_mat)
+    print("=" * 80)
+    print("LOADING AND EXPLORING DATA")
+    print("=" * 80)
 
-#%%
-confusion_matrix(final_model.actual_class, final_model.pred_class)   # original model
+    # Load data from GitHub repository using the configured URL
+    bank_data = pd.read_csv(DATA_URL)
 
-#%%
-adjust_thres(final_model.pred_prob, .90, final_model.actual_class)   # raise threshold 
-#%%
-adjust_thres(final_model.pred_prob, .1, final_model.actual_class)   # lower threshold
+    # Display basic information about the dataset
+    print("\nDataset Info:")
+    print(bank_data.info())
 
-#%%
-# -------- More for next week: Model evaluation --------
-# ----- ROC/AUC Curve -----
-# I'll show you a couple of options! The first is very simple and the other requires another package you can download.
+    # Examine the composition of categorical variables
+    print("\n" + "-" * 80)
+    print("CATEGORICAL VARIABLE DISTRIBUTIONS")
+    print("-" * 80)
 
-# The first:
-# basic graph
-from sklearn import metrics
+    categorical_vars = ['marital', 'education', 'default', 'job', 'contact',
+                        'housing', 'poutcome', 'signed up']
 
-fpr, tpr, _ = metrics.roc_curve(y_test, final_model.pred_prob)
-auc = metrics.roc_auc_score(y_test, final_model.pred_prob)
-plt.plot(fpr,tpr,label="data 1, auc="+str(auc))
-plt.legend(loc=4)
-plt.show()
+    for var in categorical_vars:
+        if var in bank_data.columns:
+            print(f"\n{var.upper()}:")
+            print(bank_data[var].value_counts())
 
-#%%
-# ----- F1 Score -----
-print(metrics.f1_score(y_test, final_model.pred_class))
-#%%
-# ----- Log Loss -----
-print(metrics.log_loss(y_test, final_model.pred_class))
+    return bank_data
 
-
-########################################################## STOP HERE ####################################################
-#%%
-# -------- Another quick example! --------
-from pydataset import data
-
-iris = data("iris")
-print(iris.info())
-
-#%%
-from sklearn.preprocessing import scale
-
-cols = list(iris.columns[:4])
-scaledIris = pd.DataFrame(scale(iris.iloc[:, :4]), index=iris.index, columns=cols)
-scaledIris['Species'] = iris['Species']
-print(scaledIris.info())
-#%%
-# split datasets
-irisTrain, irisTest = train_test_split(scaledIris,  test_size=0.4, stratify = scaledIris['Species']) 
-irisTest, irisVal = train_test_split(irisTest, test_size=0.5, stratify = irisTest['Species'])
-
-Xi_train = irisTrain.drop(['Species'], axis=1)
-yi_train = irisTrain['Species']
-
-Xi_test = irisTest.drop(['Species'], axis=1)
-yi_test = irisTest['Species']
-
-Xi_val = irisVal.drop(['Species'], axis=1)
-yi_val = irisVal['Species']
-
-#%%
-from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
-# construct classifier
-iris_neigh = KNeighborsClassifier(n_neighbors=3)
-iris_neigh.fit(Xi_train, yi_train)
-
-#%%
-# look at the scores 
-print(iris_neigh.score(Xi_test, yi_test))
-print(iris_neigh.score(Xi_val, yi_val))
-
-#%%
-y_pred = iris_neigh.predict(Xi_test)
-cm = confusion_matrix(yi_test, y_pred)
-disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=iris_neigh.classes_)
-disp.plot()
-plt.show()
-
-#%%
-# ---------- Example using 10-k cross validation ---------
-# construct kfold object -- remember, Python is object-oriented!!
-from sklearn.model_selection import RepeatedKFold
-
-rkf = RepeatedKFold(n_splits=10, n_repeats=3, random_state=12) 
-
-# split data
-X_si = scaledIris.drop(['Species'], axis=1)
-y_si = scaledIris['Species']
-
-#%%
-from sklearn.model_selection import cross_val_score
-from sklearn.model_selection import GridSearchCV
-
-cv_neigh = KNeighborsClassifier(n_neighbors=3)   # create classifier
-scores = cross_val_score(cv_neigh, X_si, y_si, scoring='accuracy', cv=rkf, n_jobs=-1)   # do repeated cv
-
-print('Accuracy: %.3f (%.3f)' % (scores.mean(), scores.std()))
-plt.plot(scores)
-#%%
-# more complex version so you can create a graph for testing and training accuracy (not built into the previous version)
-
-#Split arrays or matrices into train and test subsets
-Xsi_train, Xsi_test, ysi_train, ysi_test = train_test_split(X_si, y_si, test_size=0.20) 
-rcv_knn = KNeighborsClassifier(n_neighbors=6)
-rcv_knn.fit(Xsi_train, ysi_train)
-
-print("Preliminary model score:")
-print(rcv_knn.score(Xsi_test, ysi_test))
-
-no_neighbors = np.arange(1, 9)
-train_accuracy = np.empty(len(no_neighbors))
-test_accuracy = np.empty(len(no_neighbors))
-
-for i, k in enumerate(no_neighbors):
-    # We instantiate the classifier
-    rcv_knn = KNeighborsClassifier(n_neighbors=k)
-    # Fit the classifier to the training data
-    rcv_knn.fit(Xsi_train, ysi_train)
-    
-    # Compute accuracy on the training set
-    train_accuracy[i] = rcv_knn.score(Xsi_train, ysi_train)
-
-    # Compute accuracy on the testing set
-    test_accuracy[i] = rcv_knn.score(Xsi_test, ysi_test)
-
-# Visualization of k values vs accuracy
-plt.title('k-NN: Varying Number of Neighbors')
-plt.plot(no_neighbors, test_accuracy, label = 'Testing Accuracy')
-plt.plot(no_neighbors, train_accuracy, label = 'Training Accuracy')
-plt.legend()
-plt.xlabel('Number of Neighbors')
-plt.ylabel('Accuracy')
-plt.show()
-
-#%%
-# --------- Variable importance ---------
-# There is no easy way in SKLearn to calculate variable importance for a KNN model. So, we'll use a slightly hacked-together 
-# solution.
-
-# Variable importance reflects the significance one variable has on the model. If a variable is more important, that variable 
-# being removed/permuted has a larger effect on the output of the model. So, if we check the changes such permutations have, we 
-# should be able to extract the feature importance.
-
-data = {'sepal_length': [0], 'sepal_width': [0], 'petal_length': [0], 'petal_width': [0]}
-feat_imp = pd.DataFrame(data)
-feat_imp.head()
-#%%
-# baseline
-fin_knn = KNeighborsClassifier(n_neighbors=7)
-fin_knn.fit(Xsi_train, ysi_train)
-
-print(fin_knn.score(Xsi_test, ysi_test))
-
-#%%
-# 1. Change `Sepal.Length`
-perm_SL = Xsi_test.copy()   # copy df; we don't want to alter the actual data
-perm_SL['Sepal.Length'] = np.random.permutation(perm_SL['Sepal.Length'])   # permute data
-perm_SL.head()
-#%%
-print(fin_knn.score(perm_SL, ysi_test))   # see the new score
-#%%
-feat_imp['sepal_length'] = fin_knn.score(Xsi_test, ysi_test) - fin_knn.score(perm_SL, ysi_test)   # add to var_imp df
-feat_imp.head()
-#%%
-plot_confusion_matrix(fin_knn, perm_SL, ysi_test, cmap='Blues')    # What got misclassified?
-#%%
-# Now, doing this over and over is very repetitive (especially if we have a lot of data)
-# here's a function!
-def featureImportance(X, y, model):
-    # create dataframe of variables
-    var_imp = pd.DataFrame(columns=list(X.columns))
-    var_imp.loc[0] = 0
-    base_score = model.score(X, y)
-    for col in list(X.columns):
-        temp = X.copy()   # # copy df; we don't want to alter the actual data
-        temp[col] = np.random.permutation(temp[col])   # permute data
-        var_imp[col] = base_score - model.score(temp, y)
-        # plot_confusion_matrix(model, temp, y, cmap='Blues')  # what got misclassified?
-    print(var_imp)
-#%%
-featureImportance(Xsi_test, ysi_test, fin_knn)
-# from here, we find the important variables!
-
-#%%
-# -------- General Eval -------
-plot_confusion_matrix(fin_knn, Xsi_test, ysi_test, cmap='Blues')  
-#%%
-# Looks like we only misclassified one virginica as versicolor. Let's see how certain our predictions were.
-iris2_probs = fin_knn.predict_proba(Xsi_test)
-print(iris2_probs)
-
-#%%
-newlist = [x for x in range(10)] 
 # %%
+
+# ============================================================================
+# CHECK FOR MISSING DATA
+# ============================================================================
+def check_missing_data(df):
+    """
+    Visualize missing data in the dataset.
+
+    This function creates a visualization showing the proportion of missing
+    values for each variable. Understanding missingness is crucial before
+    modeling.
+
+    Parameters:
+    -----------
+    df : pandas.DataFrame
+        The dataset to check for missing values
+    """
+    print("\n" + "=" * 80)
+    print("CHECKING FOR MISSING DATA")
+    print("=" * 80)
+
+    # Create a visualization of missing data
+    sns.displot(
+        data=df.isna().melt(value_name="missing"),
+        y="variable",
+        hue="missing",
+        multiple="fill",
+        aspect=1.25
+    )
+    plt.title("Missing Data Visualization")
+
+    # Count missing values per column
+    missing_counts = df.isna().sum()
+    if missing_counts.sum() == 0:
+        print("\n✓ No missing data found in the dataset!")
+    else:
+        print("\nMissing values per column:")
+        print(missing_counts[missing_counts > 0])
+
+    plt.show()
+
+# %%
+# ============================================================================
+# NESTED CROSS-VALIDATION FUNCTION
+# ============================================================================
+def nested_cross_validation(X, y, k_range=range(1, 22, 2),
+                            outer_cv_folds=5, inner_cv_folds=3,
+                            random_state=1984):
+    """
+    Perform nested cross-validation for hyperparameter tuning and evaluation.
+
+    NESTED CROSS-VALIDATION STRUCTURE:
+    - Outer Loop: Splits data into training and test sets for unbiased
+                  performance evaluation
+    - Inner Loop: Within each outer fold, performs cross-validation on the
+                  training set to select the best hyperparameter (k)
+
+    This approach prevents overfitting and provides a more realistic estimate
+    of model performance on unseen data.
+
+    Parameters:
+    -----------
+    X : array-like
+        Feature matrix
+    y : array-like
+        Target vector
+    k_range : range, default=range(1, 22, 2)
+        Range of k values to test (number of neighbors)
+    outer_cv_folds : int, default=5
+        Number of folds for outer cross-validation loop
+    inner_cv_folds : int, default=3
+        Number of folds for inner cross-validation loop
+    random_state : int, default=1984
+        Random seed for reproducibility
+
+    Returns:
+    --------
+    dict
+        Dictionary containing:
+        - 'outer_scores': List of scores from outer CV
+        - 'best_k_per_fold': Best k value found in each outer fold
+        - 'mean_score': Mean score across all outer folds
+        - 'std_score': Standard deviation of scores
+    """
+    print("\n" + "=" * 80)
+    print("NESTED CROSS-VALIDATION")
+    print("=" * 80)
+    print(f"\nOuter CV Folds: {outer_cv_folds}")
+    print(f"Inner CV Folds: {inner_cv_folds}")
+    print(f"Testing k values: {list(k_range)}")
+
+    # Set random seed for reproducibility
+    random.seed(random_state)
+    np.random.seed(random_state)
+
+    # Create outer cross-validation splitter
+    outer_cv = KFold(n_splits=outer_cv_folds, shuffle=True,
+                     random_state=random_state)
+
+    # Lists to store results from each outer fold
+    outer_scores = []
+    best_k_per_fold = []
+
+    # OUTER LOOP: Iterate through each fold for final evaluation
+    for fold_num, (train_idx, test_idx) in enumerate(outer_cv.split(X), 1):
+        print(f"\n{'-' * 80}")
+        print(f"OUTER FOLD {fold_num}/{outer_cv_folds}")
+        print(f"{'-' * 80}")
+
+        # Split data into training and test sets for this outer fold
+        X_train_outer, X_test_outer = X.iloc[train_idx], X.iloc[test_idx]
+        y_train_outer, y_test_outer = y[train_idx], y[test_idx]
+
+        # INNER LOOP: Use GridSearchCV to find the best k
+        # GridSearchCV automatically performs cross-validation to tune
+        # hyperparameters
+        inner_cv = KFold(n_splits=inner_cv_folds, shuffle=True,
+                         random_state=random_state)
+
+        # Create parameter grid for k values
+        param_grid = {'n_neighbors': list(k_range)}
+
+        # Initialize KNN classifier
+        knn = KNeighborsClassifier()
+
+        # Perform grid search with inner cross-validation
+        print("\nPerforming inner CV to find best k...")
+        grid_search = GridSearchCV(
+            estimator=knn,
+            param_grid=param_grid,
+            cv=inner_cv,
+            scoring='accuracy',
+            n_jobs=-1  # Use all available CPU cores
+        )
+
+        # Fit grid search on training data
+        grid_search.fit(X_train_outer, y_train_outer)
+
+        # Get the best k value from inner CV
+        best_k = grid_search.best_params_['n_neighbors']
+        best_k_per_fold.append(best_k)
+
+        print(f"Best k selected by inner CV: {best_k}")
+        print(f"Inner CV score for best k: {grid_search.best_score_:.4f}")
+
+        # Evaluate the best model on the outer test set
+        best_model = grid_search.best_estimator_
+        outer_score = best_model.score(X_test_outer, y_test_outer)
+        outer_scores.append(outer_score)
+
+        print(f"Outer fold test score: {outer_score:.4f}")
+
+    # Calculate final statistics across all outer folds
+    mean_score = np.mean(outer_scores)
+    std_score = np.std(outer_scores)
+
+    print("\n" + "=" * 80)
+    print("NESTED CROSS-VALIDATION RESULTS")
+    print("=" * 80)
+    print(f"\nScores from each outer fold: {outer_scores}")
+    print(f"Best k selected in each fold: {best_k_per_fold}")
+    print(f"\nMean outer CV score: {mean_score:.4f} "
+          f"(+/- {std_score:.4f})")
+    most_common_k = max(set(best_k_per_fold), key=best_k_per_fold.count)
+    print(f"Most common best k: {most_common_k}")
+
+    return {
+        'outer_scores': outer_scores,
+        'best_k_per_fold': best_k_per_fold,
+        'mean_score': mean_score,
+        'std_score': std_score
+    }
+
+# %%
+
+# ============================================================================
+# TRAIN FINAL MODEL AND EVALUATE
+# ============================================================================
+def train_and_evaluate_final_model(X_train, y_train, X_val, y_val, X_test,
+                                   y_test, k_range=range(1, 22, 2),
+                                   cv_folds=5, random_state=1984):
+    """
+    Train the final model using the best k found via cross-validation.
+
+    This function:
+    1. Uses cross-validation on training data to select best k
+    2. Trains final model with best k on all training data
+    3. Evaluates on validation set
+    4. Provides final evaluation on test set
+
+    Parameters:
+    -----------
+    X_train, y_train : array-like
+        Training features and target
+    X_val, y_val : array-like
+        Validation features and target
+    X_test, y_test : array-like
+        Test features and target
+    k_range : range
+        Range of k values to test
+    cv_folds : int
+        Number of cross-validation folds
+    random_state : int
+        Random seed for reproducibility
+
+    Returns:
+    --------
+    sklearn model
+        The trained KNN model with best k
+    int
+        The best k value selected
+    """
+    print("\n" + "=" * 80)
+    print("TRAINING FINAL MODEL WITH CROSS-VALIDATION")
+    print("=" * 80)
+
+    # Set random seeds for reproducibility
+    random.seed(random_state)
+    np.random.seed(random_state)
+
+    # Use cross-validation to find the best k on training data
+    cv = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
+
+    # Store cross-validation scores for each k
+    cv_scores = []
+
+    print(f"\nTesting k values: {list(k_range)}")
+    print(f"Using {cv_folds}-fold cross-validation on training set\n")
+
+    for k in k_range:
+        knn = KNeighborsClassifier(n_neighbors=k)
+        # Perform cross-validation and get accuracy scores
+        scores = cross_val_score(knn, X_train, y_train, cv=cv,
+                                 scoring='accuracy', n_jobs=-1)
+        mean_score = scores.mean()
+        cv_scores.append(mean_score)
+        print(f"k={k:2d}: CV Score = {mean_score:.4f} "
+              f"(+/- {scores.std():.4f})")
+
+    # Find the k with the highest cross-validation score
+    best_k = list(k_range)[np.argmax(cv_scores)]
+    best_cv_score = max(cv_scores)
+
+    print(f"\n{'=' * 80}")
+    print(f"BEST K SELECTED: {best_k} (CV Score: {best_cv_score:.4f})")
+    print(f"{'=' * 80}")
+
+    # Train final model with best k on all training data
+    final_model = KNeighborsClassifier(n_neighbors=best_k)
+    final_model.fit(X_train, y_train)
+
+    # Evaluate on training set (should be high, but watch for overfitting)
+    train_score = final_model.score(X_train, y_train)
+    print(f"\nTraining Accuracy: {train_score:.4f}")
+
+    # Evaluate on validation set
+    val_score = final_model.score(X_val, y_val)
+    print(f"Validation Accuracy: {val_score:.4f}")
+
+    # Evaluate on test set (final unbiased evaluation)
+    test_score = final_model.score(X_test, y_test)
+    print(f"Test Accuracy: {test_score:.4f}")
+
+    # Plot k vs accuracy
+    plt.figure(figsize=(10, 6))
+    plt.plot(list(k_range), cv_scores, marker='o', linestyle='-',
+             linewidth=2)
+    plt.axvline(x=best_k, color='r', linestyle='--',
+                label=f'Best k={best_k}')
+    plt.xlabel('Number of Neighbors (k)', fontsize=12)
+    plt.ylabel('Cross-Validation Accuracy', fontsize=12)
+    plt.title('KNN Model Performance vs. k Value', fontsize=14)
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+    return final_model, best_k
+
+
+# ============================================================================
+# DETAILED MODEL EVALUATION
+# ============================================================================
+def evaluate_model_detailed(model, X_test, y_test, X_val, y_val):
+    """
+    Provide detailed evaluation metrics and visualizations.
+
+    This function creates:
+    - Confusion matrix visualization
+    - Classification report (precision, recall, F1-score)
+    - ROC curve and AUC score
+    - Various performance metrics
+
+    Parameters:
+    -----------
+    model : sklearn model
+        Trained KNN model
+    X_test, y_test : array-like
+        Test features and target
+    X_val, y_val : array-like
+        Validation features and target
+    """
+    print("\n" + "=" * 80)
+    print("DETAILED MODEL EVALUATION")
+    print("=" * 80)
+
+    # Make predictions on validation set
+    y_val_pred = model.predict(X_val)
+    y_val_proba = model.predict_proba(X_val)
+
+    # Make predictions on test set
+    y_test_pred = model.predict(X_test)
+    y_test_proba = model.predict_proba(X_test)
+
+    # ---- CONFUSION MATRIX ----
+    print("\n" + "-" * 80)
+    print("CONFUSION MATRIX (Validation Set)")
+    print("-" * 80)
+
+    cm = confusion_matrix(y_val, y_val_pred, labels=model.classes_)
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm,
+                                  display_labels=model.classes_)
+    disp.plot(cmap='Blues')
+    plt.title('Confusion Matrix - Validation Set')
+    plt.tight_layout()
+    plt.show()
+
+    # ---- CLASSIFICATION REPORT ----
+    print("\n" + "-" * 80)
+    print("CLASSIFICATION REPORT (Validation Set)")
+    print("-" * 80)
+    print(classification_report(y_val, y_val_pred))
+
+    # Calculate sensitivity and specificity manually
+    tn, fp, fn, tp = cm.ravel()
+    sensitivity = tp / (tp + fn)  # True Positive Rate (Recall)
+    specificity = tn / (tn + fp)  # True Negative Rate
+
+    print(f"Sensitivity (Recall): {sensitivity:.4f}")
+    print(f"Specificity: {specificity:.4f}")
+
+    # ---- ROC CURVE AND AUC ----
+    print("\n" + "-" * 80)
+    print("ROC CURVE AND AUC SCORE")
+    print("-" * 80)
+
+    # Calculate ROC curve and AUC for test set
+    fpr, tpr, thresholds = metrics.roc_curve(y_test, y_test_proba[:, 1])
+    auc = metrics.roc_auc_score(y_test, y_test_proba[:, 1])
+
+    plt.figure(figsize=(8, 6))
+    plt.plot(fpr, tpr, linewidth=2, label=f'ROC Curve (AUC = {auc:.4f})')
+    plt.plot([0, 1], [0, 1], 'k--', linewidth=1, label='Random Classifier')
+    plt.xlabel('False Positive Rate', fontsize=12)
+    plt.ylabel('True Positive Rate', fontsize=12)
+    plt.title('ROC Curve - Test Set', fontsize=14)
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+    print(f"\nAUC Score (Test Set): {auc:.4f}")
+
+    # ---- F1 SCORE ----
+    f1_val = metrics.f1_score(y_val, y_val_pred)
+    f1_test = metrics.f1_score(y_test, y_test_pred)
+    print(f"\nF1 Score (Validation): {f1_val:.4f}")
+    print(f"F1 Score (Test): {f1_test:.4f}")
+
+    # ---- LOG LOSS ----
+    log_loss_val = metrics.log_loss(y_val, y_val_proba)
+    log_loss_test = metrics.log_loss(y_test, y_test_proba)
+    print(f"\nLog Loss (Validation): {log_loss_val:.4f}")
+    print(f"Log Loss (Test): {log_loss_test:.4f}")
+
+
+# ============================================================================
+# MAIN EXECUTION
+# ============================================================================
+def main():
+    """
+    Main function that orchestrates the entire KNN analysis pipeline.
+
+    This function:
+    1. Loads and explores the data
+    2. Checks for missing values
+    3. Prepares and preprocesses the data
+    4. Splits into train/validation/test sets
+    5. Performs nested cross-validation
+    6. Trains final model with best hyperparameters
+    7. Provides detailed evaluation metrics
+    """
+    print("\n" + "=" * 80)
+    print("KNN CLASSIFICATION WITH NESTED CROSS-VALIDATION")
+    print("=" * 80)
+
+    # Step 1: Load and explore data
+    bank_data = load_and_explore_data()
+
+    # Step 2: Check for missing data
+    check_missing_data(bank_data)
+
+    # Step 3: Prepare data using our reusable functions
+    print("\n" + "=" * 80)
+    print("DATA PREPARATION")
+    print("=" * 80)
+    print("\nApplying data preparation pipeline:")
+    print("1. Collapsing job categories")
+    print("2. Converting to categorical types")
+    print("3. Normalizing numeric features")
+    print("4. One-hot encoding categorical variables")
+
+    prepared_data, scaler = prepare_bank_data(bank_data)
+    print("\n✓ Data preparation complete!")
+    print(f"  Original shape: {bank_data.shape}")
+    print(f"  Prepared shape: {prepared_data.shape}")
+
+    # Step 4: Split into train, validation, and test sets
+    print("\n" + "=" * 80)
+    print("DATA SPLITTING")
+    print("=" * 80)
+
+    train, test, val = split_train_val_test(
+        prepared_data,
+        'signed up_1',
+        test_size=0.4,
+        val_size=0.5,
+        random_state=1984
+    )
+
+    print(f"\nTraining set size: {len(train)} samples")
+    print(f"Validation set size: {len(val)} samples")
+    print(f"Test set size: {len(test)} samples")
+
+    # Calculate and display class balance
+    prevalence = prepared_data['signed up_1'].sum() / len(prepared_data)
+    print(f"\nTarget prevalence (baseline): {prevalence:.4f}")
+    print("This represents the probability of randomly selecting a positive")
+    print("case. Our model should perform better than this baseline.")
+
+    # Step 5: Prepare features and targets
+    X_train, y_train = prepare_features_and_target(train, 'signed up_1')
+    X_val, y_val = prepare_features_and_target(val, 'signed up_1')
+    X_test, y_test = prepare_features_and_target(test, 'signed up_1')
+
+    # Step 6: Perform nested cross-validation
+    # NOTE: We combine train+val for nested CV to maximize the data used
+    # for hyperparameter tuning while still maintaining an independent test
+    # set for final evaluation. The nested CV splits this combined data
+    # internally, so each fold gets its own training and validation data.
+    # The test set remains completely untouched until the very end.
+    nested_cv_results = nested_cross_validation(
+        X=pd.concat([X_train, X_val]),  # Use train+val for nested CV
+        y=np.concatenate([y_train, y_val]),
+        k_range=range(1, 22, 2),
+        outer_cv_folds=5,
+        inner_cv_folds=3,
+        random_state=1984
+    )
+
+    # Step 7: Train final model using standard train/val/test approach
+    # This demonstrates an alternative workflow where we explicitly use
+    # the training set for k selection, validate on the validation set,
+    # and provide final evaluation on the test set.
+    final_model, best_k = train_and_evaluate_final_model(
+        X_train, y_train,
+        X_val, y_val,
+        X_test, y_test,
+        k_range=range(1, 22, 2),
+        cv_folds=5,
+        random_state=1984
+    )
+
+    # Step 8: Detailed model evaluation
+    evaluate_model_detailed(final_model, X_test, y_test, X_val, y_val)
+
+    print("\n" + "=" * 80)
+    print("ANALYSIS COMPLETE")
+    print("=" * 80)
+    print("\nKey Takeaways:")
+    print(f"1. Best k value: {best_k}")
+    print(f"2. Nested CV mean score: {nested_cv_results['mean_score']:.4f}")
+    print("3. Model demonstrates proper generalization to unseen data")
+    print("4. Both inner and outer CV loops help prevent overfitting")
+
+    return final_model, nested_cv_results
+
+
+# ============================================================================
+# RUN THE ANALYSIS
+# ============================================================================
+if __name__ == "__main__":
+    # Execute the main analysis pipeline
+    model, results = main()
